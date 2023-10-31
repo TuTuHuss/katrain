@@ -40,6 +40,19 @@ from katrain.core.constants import (
 from katrain.core.game import Game, GameNode, Move
 from katrain.core.utils import var_to_grid, weighted_selection_without_replacement, evaluation_class
 
+# normalization
+def normalize_to_one(numbers):
+    total_sum = sum(numbers)
+    
+    if total_sum == 0:
+        # 避免分母为零错误，如果总和为零，则将所有数字设置为均匀分布
+        normalized_numbers = [1 / len(numbers)] * len(numbers)
+    else:
+        normalized_numbers = [x / total_sum for x in numbers]
+
+    return normalized_numbers
+
+
 
 def interp_ix(lst, x):
     i = 0
@@ -248,6 +261,8 @@ def request_ai_analysis(game: Game, cn: GameNode, extra_settings: Dict) -> Optio
         engine.check_alive(exception_if_dead=True)
     return analysis
 
+global visit_count
+visit_count = 0
 
 def generate_ai_move(game: Game, ai_mode: str, ai_settings: Dict) -> Tuple[Move, GameNode]:
     cn = game.current_node
@@ -392,12 +407,43 @@ def generate_ai_move(game: Game, ai_mode: str, ai_settings: Dict) -> Tuple[Move,
                 raise ValueError(f"Unknown Policy-based AI mode {ai_mode}")
     else:  # Engine based move
         candidate_ai_moves = cn.candidate_moves
+        policy_ranking = cn.policy_ranking
+    # Sampling and collecting suboptimal data
+        # Get candidate index set
+        import numpy as np
+        total_prob = 0
+        candidate_index = 0
+        for i in range(0, len(candidate_ai_moves)):
+            if total_prob > 0.4:
+                break
+            elif total_prob >=0 and total_prob <= 0.4:
+                move_prob = policy_ranking[i][0]    #cn.policy_ranking e.g. (0.101704247, Move(BQ16)), (0.0985028297, Move(BD16))
+                total_prob = total_prob + move_prob
+                candidate_index +=1 
+            else:
+                print('get total prob error')
+                
+        # Normalization to get weights
+        prob_list = []
+        for j in range(0,candidate_index):
+            prob_list.append(policy_ranking[j][0])
+        prob_list = normalize_to_one(prob_list)
+
+        # Sampling
+        select_element = random.choices(np.arange(0,candidate_index), weights=prob_list, k=1)
+
+
         if ai_mode == AI_HANDICAP:
             candidate_ai_moves = handicap_analysis["moveInfos"]
         elif ai_mode == AI_ANTIMIRROR:
             candidate_ai_moves = antimirror_analysis["moveInfos"]
 
-        top_cand = Move.from_gtp(candidate_ai_moves[0]["move"], player=cn.next_player)
+
+        # suboptimal data selected
+        #top_cand = Move.from_gtp(policy_ranking[int(select_element[0])][1],player=cn.next_player)
+        top_cand = policy_ranking[int(select_element[0])][1]
+        #top candidate moves
+        #top_cand = Move.from_gtp(candidate_ai_moves[0]["move"], player=cn.next_player) #Move(BR16)
         if top_cand.is_pass and ai_mode not in [
             AI_DEFAULT,
             AI_HANDICAP,
@@ -509,8 +555,17 @@ def generate_ai_move(game: Game, ai_mode: str, ai_settings: Dict) -> Tuple[Move,
                 if ai_mode == AI_ANTIMIRROR:
                     ai_thoughts += f"AntiMirror strategy found {len(candidate_ai_moves)} moves returned from the engine and chose {aimove.gtp()} as top move. antiMirror based score {cn.format_score(antimirror_analysis['rootInfo']['scoreLead'])} and win rate {cn.format_winrate(antimirror_analysis['rootInfo']['winrate'])}"
                 else:
+                    global visit_count
+                    visit_count+=1
                     ai_thoughts += f"Default strategy found {len(candidate_ai_moves)} moves returned from the engine and chose {aimove.gtp()} as top move"
     game.katrain.log(f"AI thoughts: {ai_thoughts}", OUTPUT_DEBUG)
     played_node = game.play(aimove)
     played_node.ai_thoughts = ai_thoughts
+    
+
+    # save train data (custom function for LLM+GO)
+    train_dict = {'policy':cn.policy, 'candidate_ai_moves':cn.candidate_moves, 'policy_ranking':cn.policy_ranking}  #policy = logit   candidate_ai_moves = moveInfos
+    save_path = f'/Users/hushuai/Desktop/go_analysis/inferior-game1/{visit_count}.npy'
+    np.save(save_path, train_dict, allow_pickle=True)
+
     return aimove, played_node
